@@ -10,6 +10,7 @@ export async function run(provider: NetworkProvider) {
     const tonWars = provider.open(TonWars.createFromAddress(tonWarsAddress));
 
     const [champ, champBetAmount, champWinTime] = await tonWars.getChampion();
+    const [bonusPercent, firstAffiliatePercent, secondAffiliatePercent] = await tonWars.getFeePercent();
     const betAmount = await ui.input(`Bet amount (current champ bet is ${fromNano(champBetAmount)} TON)`);
 
     const firstAffiliateInput = await ui.input('First Affiliate');
@@ -18,7 +19,9 @@ export async function run(provider: NetworkProvider) {
     const secondAffiliateInput = await ui.input('Second Affiliate');
     const secondAffiliate = secondAffiliateInput.length > 0 ? Address.parse(secondAffiliateInput) : null
 
-    await tonWars.sendPlay(provider.sender(), toNano(betAmount), { firstAffiliate, secondAffiliate });
+    const sendAmount = toNano(betAmount) * 100n / 95n + 5000000n + 17300000n + (1000008n * 3n);
+
+    await tonWars.sendPlay(provider.sender(),  sendAmount, { firstAffiliate, secondAffiliate });
 
     ui.clearActionPrompt();
 }
