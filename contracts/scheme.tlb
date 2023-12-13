@@ -1,0 +1,53 @@
+_ = MsgAddress;
+_ = Coins;
+_ {X:Type} = Maybe X;
+
+// ================================================================================================
+// ==========================================-storage-=============================================
+// ================================================================================================
+
+storage$_ owner:MsgAddress proposed_owner:MsgAddress
+          champ:MsgAddress champ_bet_amount:Coins champ_win_time:uint64 // ~993 bits + 1 cell
+          ^[bonus_paytime:uint64 bonus_percent:uint14
+          first_affiliate_percent:uint14 second_affiliate_percent:uint14
+          gas_prices:Cell] // ~554 bits
+          = Storage;
+
+// ================================================================================================
+// ======================================-common methods-==========================================
+// ================================================================================================
+
+// request
+play#57d8c932 query_id:uint64 first_affiliate:MsgAddress second_affiliate:MsgAddress = IntMsgBody;
+
+deposit_bonus#00000000 ads_text:Cell = IntMsgBody;
+
+log$_ loser:MsgAddress loser_bet_amount:Coins winner:MsgAddress winner_bet_amount:Coins
+      ^[champ:MsgAddress champ_bonus_reward:(Maybe Coins)]
+      = ExtOutMsgBody;
+
+// ================================================================================================
+// =======================================-admin methods-==========================================
+// ================================================================================================
+
+// request
+set_bonus_paytime#1ef940cb query_id:uint64 bonus_paytime:uint64 = IntMsgBody;
+
+// request
+set_bonus_percent#55ef1659 query_id:uint64 bonus_percent:uint14 = IntMsgBody;
+
+// request
+set_first_affiliate_percent#3dfab109 query_id:uint64 first_affiliate_percent:uint14 = IntMsgBody;
+
+// request
+set_second_affiliate_percent#661aa425 query_id:uint64 second_affiliate_percent:uint14 = IntMsgBody;
+
+// ================================================================================================
+// ============================-change owner (pull-over-push pattern)-=============================
+// ================================================================================================
+
+// request
+transfer_ownership#1088a29b query_id:uint64 proposed_owner:MsgAddress = IntMsgBody;
+
+// request
+accept_ownership#2eb986b6 query_id:uint64 = IntMsgBody;

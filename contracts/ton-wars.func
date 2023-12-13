@@ -1,0 +1,463 @@
+#include "imports/stdlib.fc";
+#include "imports/openlib.func/openlib.func";
+#include "imports/openlib.func/gaslib.func";
+
+
+;; =============================================================================================
+;; =======================================-Constants-===========================================
+;; =============================================================================================
+
+const int cfg::min_for_storage             = 5000000;    ;; 0.005 TON
+const int cfg::default_reserve             = 50000000;   ;; 0.05 TON
+const int cfg::play_max_gas                = 17300;      ;; win game with two affiliates + parse gas config
+
+const int cfg::min_bet_size                = 1000000000; ;; 1 TON
+
+;; -----
+
+const int op::play                         = 0x57d8c932;
+const int op::deposit_bonus                = 0x00000000; ;; is simple transfer with text comment
+
+const int op::set_bonus_paytime            = 0x1ef940cb;
+const int op::set_bonus_percent            = 0x55ef1659;
+const int op::set_first_affiliate_percent  = 0x3dfab109;
+const int op::set_second_affiliate_percent = 0x661aa425;
+
+const int op::transfer_ownership           = 0x1088a29b;
+const int op::accept_ownership             = 0x2eb986b6;
+
+;; -----
+
+const int error::already_champ             = "already_champ"c           >> 21;
+const int error::insufficient_ton          = "insufficient_ton"c        >> 21;
+const int error::wrong_bonus_paytime       = "wrong_bonus_paytime"c     >> 21;
+const int error::wrong_bonus_percent       = "wrong_bonus_percent"c     >> 21;
+const int error::wrong_affiliate_percent   = "wrong_affiliate_percent"c >> 21;
+
+;; =============================================================================================
+;; ========================================-Globals-============================================
+;; =============================================================================================
+
+global slice msg::sender;
+global int   msg::value;
+global int   msg::fwd_fee;
+
+global int   msg::query_id;
+
+global slice c4::owner;
+global slice c4::proposed_owner;
+global slice c4::champ;
+global int   c4::champ_bet_amount;
+global int   c4::champ_win_time;
+
+global int   c4::bonus_paytime;
+global int   c4::bonus_percent;
+global int   c4::first_affiliate_percent;
+global int   c4::second_affiliate_percent;
+
+global int   c4::init?;
+
+{-
+  storage$_ owner:MsgAddress proposed_owner:MsgAddress
+            champ:MsgAddress champ_bet_amount:Coins champ_win_time:uint64 // ~993 bits + 1 cell
+            ^[bonus_paytime:uint64 bonus_percent:uint10
+            first_affiliate_percent:uint10 second_affiliate_percent:uint10
+            gas_prices:Cell] // ~554 bits
+            = Storage;
+-}
+
+() c4::init() impure inline {
+  slice ds = get_data().begin_parse();
+
+  slice __owner            = ds~load_msg_addr();
+  slice __proposed_owner   = ds~load_msg_addr();
+  slice __champ            = ds~load_msg_addr();
+  int   __champ_bet_amount = ds~load_coins();
+  int   __champ_win_time   = ds~load_uint(64);
+
+  slice ds2                = ds.preload::ref::slice();
+
+  int   __bonus_paytime    = ds2~load_uint(64);
+  int   __bonus_percent    = ds2~load_uint(14);
+  int   __first_affiliate_percent  = ds2~load_uint(14);
+  int   __second_affiliate_percent = ds2~load_uint(14);
+
+  init_gas_prices(ds2);
+
+  c4::second_affiliate_percent = __second_affiliate_percent;
+  c4::first_affiliate_percent  = __first_affiliate_percent;
+  c4::bonus_percent            = __bonus_percent;
+  c4::bonus_paytime            = __bonus_paytime;
+  c4::champ_win_time           = __champ_win_time;
+  c4::champ_bet_amount         = __champ_bet_amount;
+  c4::champ                    = __champ;
+  c4::proposed_owner           = __proposed_owner;
+  c4::owner                    = __owner;
+
+  c4::init?                    = true;
+}
+
+() c4::save() impure inline {
+  set_data(begin_cell()
+          .store::slice(c4::owner)
+          .store::slice(c4::proposed_owner)
+          .store::slice(c4::champ)
+          .store_coins(c4::champ_bet_amount)
+          .store_uint(c4::champ_win_time, 64)
+          .store::builder::ref(begin_cell()
+                              .store_uint(c4::bonus_paytime, 64)
+                              .store_uint(c4::bonus_percent, 14)
+                              .store_uint(c4::first_affiliate_percent, 14)
+                              .store_uint(c4::second_affiliate_percent, 14)
+                              .store::gas_prices())
+          .end_cell()
+  );
+}
+
+;; =============================================================================================
+;; =========================================-Utils-=============================================
+;; =============================================================================================
+
+
+() check::sender_is_not_champ() impure inline {
+  throw_if(error::already_champ, ext::slices_equal?(msg::sender, c4::champ));
+}
+
+() check::enough_tons_for_bet(int x) impure inline {
+  throw_unless(error::insufficient_ton, x > cfg::min_bet_size);
+}
+
+() check::bonus_paytime(int x) impure inline {
+  throw_unless(error::wrong_bonus_paytime, (x >= 86400) & (x <= 604800)); ;; 1 day - 1 week
+}
+
+() check::bonus_percent(int x) impure inline {
+  throw_unless(error::wrong_bonus_percent, (x >= 100) & (x <= 1000)); ;; 1-10%
+}
+
+() check::affiliate_percent(int x) impure inline {
+  throw_unless(error::wrong_affiliate_percent, (x >= 0) & (x <= 5000)); ;; 0-50%
+}
+
+() send::excesses() impure inline {
+  builder message = begin_cell()
+                   .store::int_msg_info::nobounce()
+                   .store::slice(msg::sender)
+                   .store::int_msg_info::zero&slice()
+                   .store::op::excesses()
+                   .store::query_id(msg::query_id);
+  send_raw_message(message.end_cell(), 64);
+}
+
+builder store::ext_out_msg_info::slice(builder b)
+  asm "b{11} STSLICECONST 102 INT STZEROES"; ;; 104 bits
+
+builder store::ext_out_msg_info::ref(builder b)
+  asm "b{11} x{0000000000000000000000000} |+ b{01} |+ STSLICECONST";
+
+
+;; =============================================================================================
+;; ==========================================-Main-=============================================
+;; =============================================================================================
+
+() recv_internal(int msg_value, cell in_msg_full, slice in_msg_body) impure {
+  slice cs = in_msg_full.begin_parse();
+  cs~skip_bits(2);  ;; skip constuctor flag
+  int   msg::bounce?  = cs~load_int(1);
+  int   msg::bounced? = cs~load_int(1);
+  slice __sender      = cs~load_msg_addr();
+
+  cs~load_msg_addr();   ;; skip dst
+  cs~load_coins();      ;; skip value
+  cs~skip_bits(1);  ;; skip extracurrency collection
+  cs~load_coins();      ;; skip ihr_fee
+
+  msg::fwd_fee = muldiv(cs~load_coins(), 3, 2);
+
+  msg::sender = __sender;
+  check::address(__sender); ;; should be addr_std with workchain 0 and without anycast
+
+  throw_if(0, msg::bounced?);
+
+  ifnot (msg::bounce?) {
+    builder message = begin_cell()
+                     .store::int_msg_info::nobounce()
+                     .store::slice(msg::sender)
+                     .store::int_msg_info::zero&text()
+                     .store::slice("Messages with flag bounce:false is not supported");
+    send_raw_message(message.end_cell(), 64 + 2);
+  }
+
+  int   msg::op       = in_msg_body~load_uint(32);
+        msg::query_id = msg::op ? in_msg_body~load_uint(64) : 0;
+  slice msg::payload  = in_msg_body;
+
+  msg::value = msg_value;
+
+  unsafe::reserve::50000000();
+
+  c4::init();
+
+  if (msg::op == op::play) {
+    {- play#57d8c932 query_id:uint64 first_affiliate:MsgAddress second_affiliate:MsgAddress = IntMsgBody; -}
+    check::sender_is_not_champ();
+    slice first_affiliate  = msg::payload~load_msg_addr();
+    slice second_affiliate = msg::payload~load_msg_addr();
+    msg::payload.end_parse();
+
+    int bet_amount = msg::value - cfg::min_for_storage - msg::fwd_fee * 3 - gas_to_gram(cfg::play_max_gas);
+
+    check::enough_tons_for_bet(bet_amount);
+
+    int bonus_part = muldiv(bet_amount, c4::bonus_percent, 10000);
+
+    bet_amount -= bonus_part;
+
+    int first_affiliate_reward  = ext::addr_std?(first_affiliate)
+                                ? muldiv(bonus_part, c4::first_affiliate_percent, 10000)
+                                : 0;
+    int second_affiliate_reward = ext::addr_std?(second_affiliate)
+                                ? muldiv(first_affiliate_reward, c4::second_affiliate_percent, 10000)
+                                : 0;
+
+    if (second_affiliate_reward) {
+      first_affiliate_reward -= second_affiliate_reward;
+      builder message = begin_cell()
+                       .store::int_msg_info::bounce()
+                       .store::slice(second_affiliate)
+                       .store_coins(second_affiliate_reward)
+                       .store::int_msg_info::text()
+                       .store::slice("Affiliate reward");
+      send_raw_message(message.end_cell(), 0 + 2);
+    }
+
+    if (first_affiliate_reward) {
+      builder message = begin_cell()
+                       .store::int_msg_info::bounce()
+                       .store::slice(first_affiliate)
+                       .store_coins(first_affiliate_reward)
+                       .store::int_msg_info::text()
+                       .store::slice("Affiliate reward");
+      send_raw_message(message.end_cell(), 0 + 2);
+    }
+
+    ;; GAME
+    randomize_lt();
+    dump_stack();
+    int game_result = rand(c4::champ_bet_amount + bet_amount) + 1; ;; rand() generated pseudo-random number in the range `0..range−1`
+    dump_stack();
+    if (game_result > c4::champ_bet_amount) { ;; WIN
+      int full_bonus = ext::my_balance() - msg::value - c4::champ_bet_amount - cfg::default_reserve;
+      int champ_duration = now() - c4::champ_win_time;
+      int champ_bonus_reward = min(full_bonus, muldiv(full_bonus, champ_duration, c4::bonus_paytime));
+
+      builder log = begin_cell()
+                   .store::ext_out_msg_info::slice()
+                   .store::slice(c4::champ)
+                   .store_coins(c4::champ_bet_amount)
+                   .store::slice(msg::sender)
+                   .store_coins(bet_amount)
+                   .store::builder::ref(begin_cell()
+                                       .store::slice(msg::sender)
+                                       .store::one()
+                                       .store_coins(champ_bonus_reward));
+      send_raw_message(log.end_cell(), 0);
+
+      builder message = begin_cell()
+                       .store::int_msg_info::bounce()
+                       .store::slice(c4::champ)
+                       .store_coins(champ_bonus_reward)
+                       .store::int_msg_info::text()
+                       .store::slice("You've been defeated.");
+      send_raw_message(message.end_cell(), 1);
+
+      builder message = begin_cell()
+                       .store::int_msg_info::bounce()
+                       .store::slice(msg::sender)
+                       .store_coins(c4::champ_bet_amount)
+                       .store::int_msg_info::text()
+                       .store::slice("You beat the champion. Congrats!");
+      send_raw_message(message.end_cell(), 1);
+
+      c4::champ = msg::sender;
+      c4::champ_bet_amount = bet_amount;
+      c4::champ_win_time = now();
+    } else { ;; LOSE
+      builder message = begin_cell()
+                       .store::int_msg_info::bounce()
+                       .store::slice(msg::sender)
+                       .store::int_msg_info::zero&text()
+                       .store::slice("Better luck next time.");
+      send_raw_message(message.end_cell(), 1);
+
+      builder message = begin_cell()
+                       .store::int_msg_info::bounce()
+                       .store::slice(c4::champ)
+                       .store_coins(bet_amount)
+                       .store::int_msg_info::text()
+                       .store::slice("You won. Again.");
+      send_raw_message(message.end_cell(), 1);
+
+      builder log = begin_cell()
+                   .store::ext_out_msg_info::slice()
+                   .store::slice(msg::sender)
+                   .store_coins(bet_amount)
+                   .store::slice(c4::champ)
+                   .store_coins(c4::champ_bet_amount)
+                   .store::builder::ref(begin_cell()
+                                       .store::slice(c4::champ)
+                                       .store::zero());
+      send_raw_message(log.end_cell(), 0);
+    }
+
+    c4::save();
+    return ();
+  }
+
+  if (msg::op == op::deposit_bonus) {
+    {- deposit_bonus#00000000 ads_text:Cell = IntMsgBody; -}
+    builder message = begin_cell()
+                     .store::int_msg_info::bounce()
+                     .store::slice(msg::sender)
+                     .store::int_msg_info::zero&text()
+                     .store::slice("Thanks for your deposit in the bonus pool.");
+    send_raw_message(message.end_cell(), 1 + 2);
+
+    c4::save();
+    return ();
+  }
+
+  if (msg::op == op::set_bonus_paytime) {
+    {- set_bonus_paytime#1ef940cb query_id:uint64 bonus_paytime:uint64 = IntMsgBody; -}
+    check::access(c4::owner, msg::sender);
+
+    int bonus_paytime = msg::payload~load_uint(64);
+    msg::payload.end_parse();
+
+    check::bonus_paytime(bonus_paytime);
+
+    c4::bonus_paytime = bonus_paytime;
+
+    send::excesses();
+
+    c4::save();
+    return ();
+  }
+
+  if (msg::op == op::set_bonus_percent) {
+    {- set_bonus_percent#55ef1659 query_id:uint64 bonus_percent:uint14 = IntMsgBody; -}
+    check::access(c4::owner, msg::sender);
+
+    int bonus_percent = msg::payload~load_uint(14);
+    msg::payload.end_parse();
+
+    check::bonus_percent(bonus_percent);
+
+    c4::bonus_percent = bonus_percent;
+
+    send::excesses();
+
+    c4::save();
+    return ();
+  }
+
+  if (msg::op == op::set_first_affiliate_percent) {
+    {- set_first_affiliate_percent#3dfab109 query_id:uint64 first_affiliate_percent:uint14 = IntMsgBody; -}
+    check::access(c4::owner, msg::sender);
+
+    int first_affiliate_percent = msg::payload~load_uint(14);
+    msg::payload.end_parse();
+
+    check::affiliate_percent(first_affiliate_percent);
+
+    c4::first_affiliate_percent = first_affiliate_percent;
+
+    send::excesses();
+
+    c4::save();
+    return ();
+  }
+
+  if (msg::op == op::set_second_affiliate_percent) {
+    {- set_second_affiliate_percent#661aa425 query_id:uint64 second_affiliate_percent:uint14 = IntMsgBody; -}
+    check::access(c4::owner, msg::sender);
+
+    int second_affiliate_percent = msg::payload~load_uint(14);
+    msg::payload.end_parse();
+
+    check::affiliate_percent(second_affiliate_percent);
+
+    c4::second_affiliate_percent = second_affiliate_percent;
+
+    send::excesses();
+
+    c4::save();
+    return ();
+  }
+
+  ;; change owner (pull-over-push)
+  if (msg::op == op::transfer_ownership) {
+    {- transfer_ownership#1088a29b query_id:uint64 proposed_owner:MsgAddress = IntMsgBody; -}
+    check::access(c4::owner, msg::sender);
+
+    slice proposed_owner = msg::payload~load_msg_addr();
+    msg::payload.end_parse();
+
+    check::address_or_none(proposed_owner);
+
+    c4::proposed_owner = proposed_owner;
+
+    send::excesses();
+
+    c4::save();
+    return ();
+  }
+
+  if (msg::op == op::accept_ownership) {
+    {- accept_ownership#2eb986b6 query_id:uint64 = IntMsgBody; -}
+    msg::payload.end_parse();
+
+    slice proposed_owner = c4::proposed_owner;
+    check::access(proposed_owner, msg::sender);
+
+    c4::owner = proposed_owner;
+    c4::proposed_owner = ext::addr_none;
+
+    send::excesses();
+
+    c4::save();
+    return ();
+  }
+
+  throw(0x7ff);
+}
+
+;; =============================================================================================
+;; ======================================-Get-Methods-==========================================
+;; =============================================================================================
+
+(int, int, int) get_bonus_status() method_id {
+  c4::init();
+  int full_bonus = ext::my_balance() - c4::champ_bet_amount - cfg::default_reserve;
+  return (c4::bonus_paytime, full_bonus, c4::champ_win_time);
+}
+
+(int, int, int) get_fee_percent() method_id {
+  c4::init();
+  return (c4::bonus_percent, c4::first_affiliate_percent, c4::second_affiliate_percent);
+}
+
+(slice, int, int) get_champion() method_id {
+  c4::init();
+  return (c4::champ, c4::champ_bet_amount, c4::champ_win_time);
+}
+
+(slice, slice) get_ownership_info() method_id {
+  c4::init();
+  return (c4::owner, c4::proposed_owner);
+}
+
+(int, int, int, int) get_gas_params() method_id {
+  c4::init();
+  return (c4::gas_cfg_hash, c4::gas_price, c4::flat_gas_limit, c4::flat_gas_price);
+}

@@ -1,0 +1,3 @@
+[submodule "contracts/imports/openlib.func"]
+	path = contracts/imports/openlib.func
+	url = https://github.com/continuation-team/openlib.func
