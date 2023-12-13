@@ -243,9 +243,8 @@ builder store::ext_out_msg_info::ref(builder b)
 
     ;; GAME
     randomize_lt();
-    dump_stack();
     int game_result = rand(c4::champ_bet_amount + bet_amount) + 1; ;; rand() generated pseudo-random number in the range `0..range−1`
-    dump_stack();
+
     if (game_result > c4::champ_bet_amount) { ;; WIN
       int full_bonus = ext::my_balance() - msg::value - c4::champ_bet_amount - cfg::default_reserve;
       int champ_duration = now() - c4::champ_win_time;
